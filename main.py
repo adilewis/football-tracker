@@ -1048,7 +1048,23 @@ def index():
 
 @app.route("/health")
 def health():
-    lines = [f"Status: OK", f"Tracked games: {len(TRACKED_GAMES)}"]
+    mins_since = (datetime.utcnow() - _last_snapshot_time).total_seconds() / 60
+    games_24h  = sum(1 for info in TRACKED_GAMES.values()
+                     if get_hours_to_game(info["game_time"]) <= 24)
+
+    if mins_since > 60 and games_24h > 0:
+        status = "CRITICAL"
+    elif mins_since > 30 and games_24h > 0:
+        status = "WARNING"
+    else:
+        status = "OK"
+
+    lines = [
+        f"Status:            {status}",
+        f"Tracked games:     {len(TRACKED_GAMES)} total | {games_24h} within 24h",
+        f"Last snapshot:     {mins_since:.0f} min ago (memory)",
+        f"Fail cycles:       {_snap_fail_cycles}",
+    ]
     try:
         conn = get_conn()
         c = conn.cursor()
@@ -1060,10 +1076,15 @@ def health():
         c.execute("""SELECT COUNT(*) FROM odds_snapshots
                      WHERE snapshot_time::timestamptz > NOW() - INTERVAL '24 hours'""")
         snaps_24h = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM pick_log WHERE result='PENDING'")
+        pending = c.fetchone()[0]
         conn.close()
-        lines.append(f"Last snapshot: {last_snap}")
-        lines.append(f"Snapshots last 1h:  {snaps_1h}")
-        lines.append(f"Snapshots last 24h: {snaps_24h}")
+        lines += [
+            f"Last snapshot (DB): {last_snap}",
+            f"Snapshots 1h:      {snaps_1h}",
+            f"Snapshots 24h:     {snaps_24h}",
+            f"Pending picks:     {pending}",
+        ]
     except Exception as e:
         lines.append(f"DB error: {e}")
     return "<pre>" + "\n".join(lines) + "</pre>"
@@ -1307,15 +1328,27 @@ def commands_loop():
 # MAIN LOOP
 # ──────────────────────────────────────────────────────
 _last_snapshot_time = datetime.utcnow()
+_snap_fail_cycles   = 0   # consecutive cycles with 0 new snapshots
 
 def main_loop():
-    global _last_snapshot_time
+    global _last_snapshot_time, _snap_fail_cycles
     last_game_refresh  = datetime.utcnow() - timedelta(hours=2)
     last_result_check  = datetime.utcnow() - timedelta(hours=2)
     last_cleanup       = datetime.utcnow() - timedelta(hours=12)
+    last_stale_alert   = None
 
     print("Football-tracker starting...")
-    init_db()
+
+    # DB init with retry — don't crash if DB is slow to start
+    for attempt in range(10):
+        try:
+            init_db()
+            print("DB initialized OK")
+            break
+        except Exception as e:
+            print(f"init_db attempt {attempt+1}/10 failed: {e} — retrying in 15s")
+            time.sleep(15)
+
     update_tracked_games()
 
     while True:
@@ -1387,17 +1420,63 @@ def main_loop():
                 if odds:
                     save_snapshot(game_id, info, odds)
                     _last_snapshot_time = datetime.utcnow()
+                    _snap_fail_cycles   = 0
                     check_movements(game_id, info)
                 time.sleep(0.7)
             except Exception as e:
                 print(f"Game loop error {game_id}: {e}")
 
-        print(f"[CYCLE] {len(TRACKED_GAMES)} games | {now.strftime('%H:%M:%S')} UTC")
+        # Stale detection: if no snapshot for 45 min with tracked games → warn + force refresh
+        mins_since_snap = (datetime.utcnow() - _last_snapshot_time).total_seconds() / 60
+        games_within_24h = sum(
+            1 for info in TRACKED_GAMES.values()
+            if get_hours_to_game(info["game_time"]) <= 24
+        )
+        if mins_since_snap > 45 and games_within_24h > 0:
+            _snap_fail_cycles += 1
+            print(f"[STALE] No snapshot for {mins_since_snap:.0f} min, {games_within_24h} games <24h — fail_cycles={_snap_fail_cycles}")
+            if _snap_fail_cycles >= 3 and (not last_stale_alert or
+                    (datetime.utcnow() - last_stale_alert).total_seconds() > 7200):
+                send_telegram(
+                    f"⚠️ Football Tracker — אין snapshots כבר {mins_since_snap:.0f} דקות\n"
+                    f"משחקים במעקב: {len(TRACKED_GAMES)} ({games_within_24h} בתוך 24h)\n"
+                    f"מנסה לרענן רשימת משחקים..."
+                )
+                last_stale_alert = datetime.utcnow()
+            # Force game list refresh on stale
+            try:
+                update_tracked_games()
+                last_game_refresh = datetime.utcnow()
+            except Exception as e:
+                print(f"Force refresh error: {e}")
+
+        print(f"[CYCLE] {len(TRACKED_GAMES)} games ({games_within_24h} <24h) | "
+              f"last_snap={mins_since_snap:.0f}m ago | {now.strftime('%H:%M:%S')} UTC")
         time.sleep(1200)  # 20-minute cycle
 
 
+# ──────────────────────────────────────────────────────
+# WATCHDOG — restarts threads if they crash
+# ──────────────────────────────────────────────────────
+def _guarded_main_loop():
+    while True:
+        try:
+            main_loop()
+        except Exception as e:
+            print(f"[WATCHDOG] main_loop crashed: {e} — restarting in 30s")
+            time.sleep(30)
+
+def _guarded_commands_loop():
+    while True:
+        try:
+            commands_loop()
+        except Exception as e:
+            print(f"[WATCHDOG] commands_loop crashed: {e} — restarting in 10s")
+            time.sleep(10)
+
+
 if __name__ == "__main__":
-    threading.Thread(target=main_loop,    daemon=True).start()
-    threading.Thread(target=commands_loop, daemon=True).start()
+    threading.Thread(target=_guarded_main_loop,    daemon=True).start()
+    threading.Thread(target=_guarded_commands_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
