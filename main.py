@@ -918,14 +918,16 @@ def render_dashboard():
                 f'<div class="tl-item"><div class="tl-label">משחק</div><div class="tl-val">{time_label}</div></div>'
                 f'</div>'
             )
+            home_short = g["home"][:10]
+            away_short = g["away"][:10]
             grid = (
                 f'<div class="odds-grid">'
-                f'{odds_box(f"🏠 {g[\"home\"][:10]}", f_row[1], l_row[1])}'
-                f'{odds_box("🤝 שוויון",              f_row[2], l_row[2])}'
-                f'{odds_box(f"✈️ {g[\"away\"][:10]}", f_row[3], l_row[3])}'
-                f'{odds_box("קו O/U",                 f_row[4], l_row[4])}'
-                f'{odds_box("Over",                   f_row[5], l_row[5])}'
-                f'{odds_box("Under",                  f_row[6], l_row[6])}'
+                f'{odds_box("🏠 " + home_short, f_row[1], l_row[1])}'
+                f'{odds_box("🤝 שוויון",        f_row[2], l_row[2])}'
+                f'{odds_box("✈️ " + away_short, f_row[3], l_row[3])}'
+                f'{odds_box("קו O/U",           f_row[4], l_row[4])}'
+                f'{odds_box("Over",             f_row[5], l_row[5])}'
+                f'{odds_box("Under",            f_row[6], l_row[6])}'
                 f'</div>'
             )
         else:
