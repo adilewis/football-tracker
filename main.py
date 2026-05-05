@@ -171,7 +171,7 @@ def get_games_today():
     games = []
     seen_ids = set()
     headers = {"x-apisports-key": API_KEY}
-    dates = [(datetime.utcnow() + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(5)]
+    dates = [(datetime.utcnow() + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
 
     for i, date in enumerate(dates):
         # General date scan for all 5 days (1 request per day = 5 total)
@@ -1321,8 +1321,8 @@ def main_loop():
     while True:
         now = datetime.utcnow()
 
-        # Refresh tracked game list every 3 hours
-        if (now - last_game_refresh).total_seconds() >= 10800:
+        # Refresh tracked game list every 2 hours
+        if (now - last_game_refresh).total_seconds() >= 7200:
             try:
                 update_tracked_games()
                 last_game_refresh = now
@@ -1360,15 +1360,29 @@ def main_loop():
                     TRACKED_GAMES.pop(game_id, None)
                     continue
 
-                # Only fetch odds for games within 48h — saves API quota
-                # Games further out stay tracked but odds come later
                 gt_check = datetime.fromisoformat(info["game_time"].replace("Z", "+00:00"))
                 if gt_check.tzinfo is None:
                     gt_check = gt_check.replace(tzinfo=timezone.utc)
                 h2g = (gt_check - datetime.now(timezone.utc)).total_seconds() / 3600
-                if h2g > 48:
-                    continue  # too far out, skip this cycle
 
+                # > 48h: skip entirely
+                if h2g > 48:
+                    continue
+
+                # 24-48h: poll once per hour (not every 20 min)
+                if h2g > 24:
+                    rows = get_snapshots(game_id)
+                    if rows:
+                        try:
+                            last_dt = datetime.fromisoformat(rows[-1][0].replace("Z", "+00:00"))
+                            if last_dt.tzinfo is None:
+                                last_dt = last_dt.replace(tzinfo=timezone.utc)
+                            if (datetime.now(timezone.utc) - last_dt).total_seconds() < 3600:
+                                continue  # polled within last hour, skip
+                        except:
+                            pass
+
+                # < 24h: poll every cycle (every 20 min) — main monitoring window
                 odds = get_odds(game_id)
                 if odds:
                     save_snapshot(game_id, info, odds)
