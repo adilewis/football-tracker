@@ -173,8 +173,8 @@ def get_games_today():
     headers = {"x-apisports-key": API_KEY}
     dates = [(datetime.utcnow() + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(5)]
 
-    for date in dates:
-        # General date scan
+    for i, date in enumerate(dates):
+        # General date scan for all 5 days (1 request per day = 5 total)
         try:
             r = requests.get(f"{API_BASE}/fixtures?date={date}&timezone=UTC", headers=headers, timeout=15)
             for g in r.json().get("response", []):
@@ -186,19 +186,21 @@ def get_games_today():
             print(f"API error (date={date}): {e}")
         time.sleep(0.7)
 
-        # Specific leagues to ensure coverage
-        for lid, season in SPECIFIC_LEAGUES:
-            try:
-                url = f"{API_BASE}/fixtures?league={lid}&season={season}&date={date}&timezone=UTC"
-                r = requests.get(url, headers=headers, timeout=15)
-                for g in r.json().get("response", []):
-                    gid = str(g["fixture"]["id"])
-                    if gid not in seen_ids:
-                        seen_ids.add(gid)
-                        games.append(g)
-            except Exception as e:
-                print(f"API error (league={lid}): {e}")
-            time.sleep(0.4)
+        # Specific leagues only for today and tomorrow (day 0 and 1) — covers most cases
+        # Days 2-4 rely on the general scan to save API quota
+        if i <= 1:
+            for lid, season in SPECIFIC_LEAGUES:
+                try:
+                    url = f"{API_BASE}/fixtures?league={lid}&season={season}&date={date}&timezone=UTC"
+                    r = requests.get(url, headers=headers, timeout=15)
+                    for g in r.json().get("response", []):
+                        gid = str(g["fixture"]["id"])
+                        if gid not in seen_ids:
+                            seen_ids.add(gid)
+                            games.append(g)
+                except Exception as e:
+                    print(f"API error (league={lid}): {e}")
+                time.sleep(0.4)
 
     print(f"Fetched {len(games)} football fixtures total")
     return games
@@ -1319,8 +1321,8 @@ def main_loop():
     while True:
         now = datetime.utcnow()
 
-        # Refresh tracked game list every 60 minutes
-        if (now - last_game_refresh).total_seconds() >= 3600:
+        # Refresh tracked game list every 3 hours
+        if (now - last_game_refresh).total_seconds() >= 10800:
             try:
                 update_tracked_games()
                 last_game_refresh = now
@@ -1368,7 +1370,7 @@ def main_loop():
                 print(f"Game loop error {game_id}: {e}")
 
         print(f"[CYCLE] {len(TRACKED_GAMES)} games | {now.strftime('%H:%M:%S')} UTC")
-        time.sleep(300)  # 5-minute cycle
+        time.sleep(600)  # 10-minute cycle
 
 
 if __name__ == "__main__":
