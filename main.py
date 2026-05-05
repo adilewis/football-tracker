@@ -1360,17 +1360,26 @@ def main_loop():
                     TRACKED_GAMES.pop(game_id, None)
                     continue
 
+                # Only fetch odds for games within 48h — saves API quota
+                # Games further out stay tracked but odds come later
+                gt_check = datetime.fromisoformat(info["game_time"].replace("Z", "+00:00"))
+                if gt_check.tzinfo is None:
+                    gt_check = gt_check.replace(tzinfo=timezone.utc)
+                h2g = (gt_check - datetime.now(timezone.utc)).total_seconds() / 3600
+                if h2g > 48:
+                    continue  # too far out, skip this cycle
+
                 odds = get_odds(game_id)
                 if odds:
                     save_snapshot(game_id, info, odds)
                     _last_snapshot_time = datetime.utcnow()
                     check_movements(game_id, info)
-                time.sleep(0.7)  # ~85 games/min — well under 100/min API limit
+                time.sleep(0.7)
             except Exception as e:
                 print(f"Game loop error {game_id}: {e}")
 
         print(f"[CYCLE] {len(TRACKED_GAMES)} games | {now.strftime('%H:%M:%S')} UTC")
-        time.sleep(600)  # 10-minute cycle
+        time.sleep(1200)  # 20-minute cycle
 
 
 if __name__ == "__main__":
