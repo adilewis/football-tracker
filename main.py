@@ -79,6 +79,8 @@ def init_db():
     c.execute("""
         CREATE INDEX IF NOT EXISTS idx_snapshots_game_id ON odds_snapshots (game_id)
     """)
+    c.execute("ALTER TABLE odds_snapshots ADD COLUMN IF NOT EXISTS btts_yes REAL")
+    c.execute("ALTER TABLE odds_snapshots ADD COLUMN IF NOT EXISTS btts_no  REAL")
     c.execute("""
         CREATE TABLE IF NOT EXISTS sent_alerts (
             alert_key TEXT PRIMARY KEY,
@@ -128,23 +130,26 @@ def save_snapshot(game_id, info, odds):
     c.execute("""
         INSERT INTO odds_snapshots
         (game_id, snapshot_time, home_team, away_team, league, game_time,
-         ml_home, ml_draw, ml_away, ou_line, ou_over, ou_under)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+         ml_home, ml_draw, ml_away, ou_line, ou_over, ou_under,
+         btts_yes, btts_no)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, (
         game_id, datetime.utcnow().isoformat(),
         info["home"], info["away"], info["league"], info["game_time"],
         odds["ml_home"], odds["ml_draw"], odds["ml_away"],
         odds["ou_line"], odds["ou_over"], odds["ou_under"],
+        odds.get("btts_yes"), odds.get("btts_no"),
     ))
     conn.commit()
     conn.close()
 
 def get_snapshots(game_id):
-    """Returns rows: (snapshot_time[0], ml_home[1], ml_draw[2], ml_away[3], ou_line[4], ou_over[5], ou_under[6])"""
+    """Returns rows: (snapshot_time[0], ml_home[1], ml_draw[2], ml_away[3], ou_line[4], ou_over[5], ou_under[6], btts_yes[7], btts_no[8])"""
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
-        SELECT snapshot_time, ml_home, ml_draw, ml_away, ou_line, ou_over, ou_under
+        SELECT snapshot_time, ml_home, ml_draw, ml_away, ou_line, ou_over, ou_under,
+               btts_yes, btts_no
         FROM odds_snapshots WHERE game_id=%s ORDER BY snapshot_time ASC
     """, (game_id,))
     rows = c.fetchall()
@@ -250,6 +255,7 @@ def get_odds(fixture_id):
 
         ml_home_list, ml_draw_list, ml_away_list = [], [], []
         ou_over_by_line, ou_under_by_line = {}, {}
+        btts_yes_list, btts_no_list = [], []
 
         for bookmaker in data["response"][0].get("bookmakers", []):
             for bet in bookmaker.get("bets", []):
@@ -274,6 +280,13 @@ def get_odds(fixture_id):
                                     ou_under_by_line.setdefault(line, []).append(odd)
                         except:
                             pass
+                elif bet["name"] == "Both Teams Score":
+                    for v in bet["values"]:
+                        try:
+                            if v["value"] == "Yes": btts_yes_list.append(float(v["odd"]))
+                            elif v["value"] == "No":  btts_no_list.append(float(v["odd"]))
+                        except:
+                            pass
 
         if not ml_home_list:
             return None
@@ -293,9 +306,13 @@ def get_odds(fixture_id):
             ou_over  = median(ou_over_by_line[target])
             ou_under = median(ou_under_by_line[target]) if ou_under_by_line.get(target) else None
 
+        btts_yes = median(btts_yes_list) if btts_yes_list else None
+        btts_no  = median(btts_no_list)  if btts_no_list  else None
+
         return {
             "ml_home": ml_home, "ml_draw": ml_draw, "ml_away": ml_away,
             "ou_line": ou_line, "ou_over": ou_over, "ou_under": ou_under,
+            "btts_yes": btts_yes, "btts_no": btts_no,
         }
     except Exception as e:
         print(f"get_odds error {fixture_id}: {e}")
@@ -922,6 +939,10 @@ def render_dashboard():
             )
             home_short = g["home"][:10]
             away_short = g["away"][:10]
+            btts_yes_f = f_row[7] if len(f_row) > 7 else None
+            btts_no_f  = f_row[8] if len(f_row) > 8 else None
+            btts_yes_l = l_row[7] if len(l_row) > 7 else None
+            btts_no_l  = l_row[8] if len(l_row) > 8 else None
             grid = (
                 f'<div class="odds-grid">'
                 f'{odds_box("🏠 " + home_short, f_row[1], l_row[1])}'
@@ -930,6 +951,10 @@ def render_dashboard():
                 f'{odds_box("קו O/U",           f_row[4], l_row[4])}'
                 f'{odds_box("Over",             f_row[5], l_row[5])}'
                 f'{odds_box("Under",            f_row[6], l_row[6])}'
+                f'</div>'
+                f'<div class="odds-grid" style="grid-template-columns:repeat(2,1fr);margin-top:6px;max-width:300px;">'
+                f'{odds_box("✅ BTTS Yes", btts_yes_f, btts_yes_l)}'
+                f'{odds_box("❌ BTTS No",  btts_no_f,  btts_no_l)}'
                 f'</div>'
             )
         else:
@@ -1002,6 +1027,34 @@ def render_dashboard():
                     f'<span class="same">יציב ({fmt_odds(all_rows[0][4])})</span>'
                     f'</div>'
                 )
+
+            # BTTS first move (threshold 0.03 — same as 1X2)
+            if len(all_rows[0]) > 7:
+                btts_yes_fm = find_first_move(all_rows, 7, 0.03)
+                if btts_yes_fm:
+                    bt_t, bt_from, bt_to = btts_yes_fm
+                    bt_delta = bt_to - bt_from
+                    bt_arrow = "⬇" if bt_delta < 0 else "⬆"
+                    bt_cls   = "down" if bt_delta < 0 else "up"
+                    bt_sign  = "+" if bt_delta > 0 else ""
+                    fm_rows_html.append(
+                        f'<div class="fm-row">'
+                        f'<span class="fm-label">BTTS Yes ראשון:</span>'
+                        f'<span class="fm-val {bt_cls}">{bt_arrow} '
+                        f'{fmt_odds(bt_from)}→{fmt_odds(bt_to)} ({bt_sign}{bt_delta:.2f})</span>'
+                        f'<span class="fm-time"> @ {fmt_time_il(bt_t)}</span>'
+                        f'<span class="fm-ago"> {fmt_ago(bt_t)}</span>'
+                        f'</div>'
+                    )
+                else:
+                    cur_yes = all_rows[-1][7] if all_rows[-1][7] is not None else None
+                    if cur_yes is not None:
+                        fm_rows_html.append(
+                            f'<div class="fm-row">'
+                            f'<span class="fm-label">BTTS Yes:</span>'
+                            f'<span class="same">יציב ({fmt_odds(cur_yes)})</span>'
+                            f'</div>'
+                        )
 
             # Current backed odds (when signal exists)
             if signal:
